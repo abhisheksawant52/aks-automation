@@ -1,7 +1,200 @@
+---
+# ---------------------------------------------------------------------------
+# Namespace
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sample-app
+  labels:
+    app.kubernetes.io/managed-by: kubectl
+    environment: dev
 
+---
+# ---------------------------------------------------------------------------
+# Deployment — nginx
+# ---------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sample-app
+  name: nginx-deployment
+  namespace: sample-app
+  labels:
+    app: nginx
+    app.kubernetes.io/name: nginx
+    app.kubernetes.io/version: "1.27"
+    app.kubernetes.io/component: webserver
+    app.kubernetes.io/part-of: sample-app
 spec:
   replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: nginx
+        app.kubernetes.io/name: nginx
+        app.kubernetes.io/version: "1.27"
+    spec:
+      # Ensure pods are spread across nodes for availability.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: nginx
+
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+
+          # Minimal resource requests/limits — adjust for production.
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+
+          # Health checks
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # Custom welcome page injected via ConfigMap.
+          volumeMounts:
+            - name: nginx-html
+              mountPath: /usr/share/nginx/html
+
+          # Drop all unnecessary Linux capabilities.
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false   # nginx requires root to bind port 80 inside the container
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
+
+      volumes:
+        - name: nginx-html
+          configMap:
+            name: nginx-html
+
+      # Avoid running workloads on system-only nodes when taints are present.
+      tolerations:
+        - key: "node.kubernetes.io/not-ready"
+          operator: "Exists"
+          effect: "NoExecute"
+          tolerationSeconds: 300
+
+---
+# ---------------------------------------------------------------------------
+# ConfigMap — custom HTML page
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-html
+  namespace: sample-app
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>AKS Automation — Sample App</title>
+      <style>
+        body { font-family: Arial, sans-serif; display: flex; align-items: center;
+               justify-content: center; height: 100vh; margin: 0; background: #0078d4; color: #fff; }
+        .card { background: rgba(255,255,255,0.1); border-radius: 12px; padding: 2rem 3rem; text-align: center; }
+        h1 { margin: 0 0 0.5rem; font-size: 2rem; }
+        p  { margin: 0; opacity: 0.85; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>🎉 AKS Cluster is Live!</h1>
+        <p>Deployed via <strong>aks-automation</strong></p>
+      </div>
+    </body>
+    </html>
+
+---
+# ---------------------------------------------------------------------------
+# Service — LoadBalancer (public IP)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+  namespace: sample-app
+  labels:
+    app: nginx
+    app.kubernetes.io/name: nginx
+  annotations:
+    # Azure-specific: reserve a static public IP by referencing an existing
+    # Azure Public IP resource (optional — remove if not needed).
+    # service.beta.kubernetes.io/azure-load-balancer-resource-group: "my-ip-rg"
+    # loadBalancerIP: "1.2.3.4"
+spec:
+  type: LoadBalancer
+  selector:
+    app: nginx
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
+  # Preserve client source IPs; use "Cluster" if source IP preservation is not needed.
+  externalTrafficPolicy: Local
+
+---
+# ---------------------------------------------------------------------------
+# HorizontalPodAutoscaler (optional — requires metrics-server)
+# ---------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nginx-hpa
+  namespace: sample-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deployment
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
