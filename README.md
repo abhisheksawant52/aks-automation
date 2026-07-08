@@ -1,464 +1,226 @@
 # AKS Automation
 
-End-to-end tooling for provisioning and managing **Azure Kubernetes Service (AKS)** clusters. This repo combines:
+Typed Azure SDK toolkit, CLI, and Terraform infrastructure for provisioning and
+operating **Azure Kubernetes Service (AKS)** clusters.
 
-- **Terraform** — declarative infrastructure provisioning
-- **Python CLI** (`aks_manager.py`) — day-two operations (scale, credentials, list)
-- **GitHub Actions** — CI/CD pipeline with plan-on-PR and apply-on-merge
-- **Kubernetes manifests** — a sample nginx workload to smoke-test the cluster
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/abhisheksawant52/aks-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/abhisheksawant52/aks-automation/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Terraform](https://img.shields.io/badge/terraform-%3E%3D1.5-7B42BC.svg)](https://developer.hashicorp.com/terraform)
 
----
+## Overview
 
-## Table of Contents
+AKS Automation brings the two halves of an AKS platform together in one
+repository: declarative **infrastructure** (Terraform) and imperative **day-two
+operations** (a Python CLI). Terraform stands up the resource group, virtual
+network, and cluster with a system-assigned managed identity; the `aks` CLI then
+handles the operational lifecycle — creating, inspecting, scaling, upgrading, and
+deleting clusters, and fetching kubeconfig credentials — through a small, typed
+wrapper around the official Azure SDK for Python.
 
-1. [Prerequisites](#prerequisites)
-2. [Repository Structure](#repository-structure)
-3. [Quick Start](#quick-start)
-4. [Authentication](#authentication)
-5. [Terraform Usage](#terraform-usage)
-6. [Python CLI Usage](#python-cli-usage)
-7. [GitHub Actions Setup](#github-actions-setup)
-8. [Deploying the Sample App](#deploying-the-sample-app)
-9. [Cleanup](#cleanup)
-10. [Troubleshooting](#troubleshooting)
+It is aimed at platform and DevOps engineers who want a coherent, reviewable
+baseline for managing AKS across `dev` and `prod` environments without hand-
+crafting `az aks` incantations. The Python layer is fully type-hinted, uses
+`pydantic-settings` for configuration, and raises explicit, catchable errors for
+the common not-found and misconfiguration cases.
 
----
+The repository is intentionally structured like a production project: a
+`src/`-layout package, a Terraform root module with reusable sub-modules,
+environment-specific variable sets, CI, pre-commit hooks, and full open-source
+hygiene.
 
-## Prerequisites
+## Architecture
 
-| Tool | Minimum Version | Install |
-|------|----------------|---------|
-| Azure CLI | 2.60+ | [docs.microsoft.com](https://learn.microsoft.com/cli/azure/install-azure-cli) |
-| Terraform | 1.5+ | [developer.hashicorp.com](https://developer.hashicorp.com/terraform/install) |
-| Python | 3.11+ | [python.org](https://www.python.org/downloads/) |
-| kubectl | 1.29+ | [kubernetes.io](https://kubernetes.io/docs/tasks/tools/) |
+```mermaid
+flowchart TD
+    subgraph Local["Operator / CI"]
+        CLI["aks CLI (Click)"]
+        TF["Terraform"]
+    end
 
-An Azure subscription with sufficient quota for the chosen VM size and node count is also required.
+    subgraph Pkg["aks_automation package"]
+        CFG["config.py\n(pydantic-settings)"]
+        MGR["manager.py\n(AKSManager)"]
+        LOG["logging_config.py"]
+        CLI --> CFG
+        CLI --> MGR
+        MGR --> LOG
+    end
 
----
+    subgraph Azure["Microsoft Azure"]
+        RG["Resource Group"]
+        NET["VNet + Subnet"]
+        AKS["AKS Managed Cluster\n(system + user node pools)"]
+        ID["System-Assigned\nManaged Identity"]
+    end
 
-## Repository Structure
+    MGR -->|azure-sdk| AKS
+    TF -->|azurerm provider| RG
+    TF --> NET
+    TF --> AKS
+    AKS --> ID
+    RG --> NET
+    NET --> AKS
+```
+
+**Components**
+
+- **`aks` CLI** — Click-based entry point wired to `AKSManager`.
+- **`AKSManager`** — typed façade over `ContainerServiceClient` and
+  `ResourceManagementClient` with lazy client construction.
+- **Terraform root module** — resource group + `network` and `aks` sub-modules.
+- **Environments** — `dev` and `prod` tfvars and partial backend configs.
+
+## Features
+
+- Create, show, list, delete, scale, and upgrade AKS clusters from the CLI.
+- Add and scale node pools; fetch user or cluster-admin kubeconfig.
+- System-assigned managed identity — no service principal secrets to rotate.
+- Optional cluster autoscaler and Azure Monitor / Log Analytics integration.
+- Reusable Terraform `network` and `aks` modules with `dev`/`prod` environments.
+- `pydantic-settings` configuration via env vars or `.env`, plus structured logging.
+- CI (lint, test matrix, `terraform validate`), pre-commit hooks, and a slim CLI image.
+
+## Tech Stack
+
+| Layer            | Technology                                                        |
+| ---------------- | ----------------------------------------------------------------- |
+| Language         | Python 3.11+                                                      |
+| Azure SDK        | `azure-identity`, `azure-mgmt-containerservice`, `azure-mgmt-resource` |
+| CLI              | `click`                                                          |
+| Config           | `pydantic-settings`                                              |
+| Infrastructure   | Terraform (`hashicorp/azurerm`)                                  |
+| Tooling          | ruff, black, pytest, pre-commit                                 |
+| CI / Packaging   | GitHub Actions, Docker                                          |
+
+## Getting Started
+
+### Prerequisites
+
+| Tool      | Minimum Version |
+| --------- | --------------- |
+| Python    | 3.11            |
+| Terraform | 1.5             |
+| Azure CLI | 2.60            |
+| kubectl   | 1.29            |
+
+An Azure subscription with quota for the chosen VM size is required.
+
+### Install
+
+```bash
+git clone https://github.com/abhisheksawant52/aks-automation.git
+cd aks-automation
+make install          # pip install -e ".[dev]"
+```
+
+### Configure
+
+Copy `.env.example` to `.env` and fill in your values (or export the variables):
+
+```bash
+cp .env.example .env
+export AZURE_SUBSCRIPTION_ID="<subscription-id>"
+az login
+```
+
+### Run the CLI
+
+```bash
+aks --help
+
+# Create a cluster
+aks create -g my-rg -n my-cluster --location eastus --node-count 3
+
+# Inspect and scale
+aks list
+aks show -g my-rg -n my-cluster
+aks scale -g my-rg -n my-cluster --node-pool workload --node-count 5
+
+# Upgrade and fetch credentials
+aks upgrade -g my-rg -n my-cluster --kubernetes-version 1.30.0
+aks credentials -g my-rg -n my-cluster --output-file ./kubeconfig
+```
+
+### Provision infrastructure
+
+```bash
+cd terraform
+terraform init
+terraform plan  -var-file=environments/dev/terraform.tfvars
+terraform apply -var-file=environments/dev/terraform.tfvars
+```
+
+## Project Structure
 
 ```
 aks-automation/
-├── .github/
-│   └── workflows/
-│       └── aks-deploy.yml      # CI/CD pipeline
-├── ansible/                    # (reserved for configuration management)
-├── kubernetes/
-│   └── deployment.yaml         # Sample nginx app + service + HPA
-├── src/
-│   ├── aks_manager.py          # Python CLI tool
-│   └── requirements.txt        # Pinned Python dependencies
+├── src/aks_automation/
+│   ├── __init__.py          # package + __version__
+│   ├── config.py            # pydantic-settings Settings
+│   ├── logging_config.py    # logging setup
+│   ├── exceptions.py        # typed error hierarchy
+│   ├── manager.py           # AKSManager (Azure SDK wrapper)
+│   └── cli.py               # `aks` Click CLI
+├── tests/                   # pytest unit tests
 ├── terraform/
-│   ├── main.tf                 # Provider + AKS resources
-│   ├── variables.tf            # All input variables with defaults
-│   └── outputs.tf              # Cluster ID, kubeconfig, host, certs
-└── README.md
+│   ├── versions.tf          # required_providers + backend
+│   ├── providers.tf         # azurerm provider
+│   ├── main.tf              # root module (rg + modules)
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── terraform.tfvars.example
+│   ├── modules/
+│   │   ├── network/         # VNet + subnet
+│   │   └── aks/             # cluster + user node pool
+│   └── environments/        # dev / prod tfvars + backend.hcl
+├── kubernetes/              # sample workload manifest
+├── ansible/                 # optional node config playbook
+├── .github/workflows/       # ci.yml + aks-deploy.yml
+├── Dockerfile               # slim CLI image
+├── Makefile
+└── pyproject.toml
 ```
 
----
-
-## Quick Start
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/abhisheksawant52/aks-automation.git
-cd aks-automation
-
-# 2. Authenticate with Azure
-az login
-az account set --subscription "<YOUR_SUBSCRIPTION_ID>"
-export AZURE_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-
-# 3. Provision the cluster with Terraform
-cd terraform
-terraform init
-terraform apply -var="resource_group_name=my-rg" -var="cluster_name=my-cluster"
-
-# 4. Get credentials
-cd ..
-pip install -r src/requirements.txt
-python src/aks_manager.py get-credentials --resource-group my-rg --cluster-name my-cluster
-
-# 5. Deploy sample app
-kubectl apply -f kubernetes/deployment.yaml
-
-# 6. Get the external IP
-kubectl get svc nginx-service -n sample-app --watch
-```
-
----
-
-## Authentication
-
-All tools rely on **DefaultAzureCredential**, which tries the following sources in order:
-
-1. Environment variables (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`)
-2. Azure CLI (`az login`)
-3. Managed Identity (when running in Azure)
-
-For local development, `az login` is the simplest option.
-
-For CI/CD and Terraform, set the following environment variables (or use the GitHub secrets described below):
-
-```bash
-export AZURE_SUBSCRIPTION_ID="<subscription-id>"
-export ARM_CLIENT_ID="<service-principal-client-id>"
-export ARM_CLIENT_SECRET="<service-principal-client-secret>"
-export ARM_TENANT_ID="<tenant-id>"
-```
-
-### Creating a Service Principal
-
-```bash
-az ad sp create-for-rbac \
-  --name "aks-automation-sp" \
-  --role Contributor \
-  --scopes /subscriptions/<SUBSCRIPTION_ID> \
-  --sdk-auth
-```
-
-Save the JSON output — you will need it for the `AZURE_CREDENTIALS` secret.
-
----
-
-## Terraform Usage
-
-### Variables
-
-All variables have sensible defaults. Override them via `-var` flags, a `terraform.tfvars` file, or environment variables prefixed with `TF_VAR_`.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `resource_group_name` | `aks-automation-rg` | Resource group name |
-| `location` | `eastus` | Azure region |
-| `cluster_name` | `aks-automation-cluster` | AKS cluster name |
-| `kubernetes_version` | latest stable | Kubernetes version |
-| `node_count` | `3` | Initial node count |
-| `node_size` | `Standard_D2s_v3` | VM SKU |
-| `os_disk_size_gb` | `128` | OS disk size |
-| `availability_zones` | `["1","2","3"]` | AZ spread |
-| `enable_auto_scaling` | `false` | Enable cluster autoscaler |
-| `min_node_count` | `1` | Autoscaler minimum |
-| `max_node_count` | `10` | Autoscaler maximum |
-| `network_plugin` | `kubenet` | `kubenet` or `azure` |
-| `log_analytics_workspace_id` | `""` | Azure Monitor workspace ID |
-| `tags` | see `variables.tf` | Resource tags |
-
-### Commands
-
-```bash
-cd terraform
-
-# Initialise providers and backend
-terraform init
-
-# Preview changes
-terraform plan \
-  -var="resource_group_name=my-rg" \
-  -var="cluster_name=my-cluster" \
-  -var="location=eastus" \
-  -var="node_count=3"
-
-# Apply
-terraform apply \
-  -var="resource_group_name=my-rg" \
-  -var="cluster_name=my-cluster"
-
-# Read outputs
-terraform output cluster_id
-terraform output -raw kube_config   # returns the raw kubeconfig YAML
-
-# Destroy
-terraform destroy \
-  -var="resource_group_name=my-rg" \
-  -var="cluster_name=my-cluster"
-```
-
-### Using a tfvars file
-
-Create `terraform/terraform.tfvars`:
-
-```hcl
-resource_group_name = "my-rg"
-location            = "westeurope"
-cluster_name        = "prod-cluster"
-node_count          = 5
-node_size           = "Standard_D4s_v3"
-kubernetes_version  = "1.29.0"
-enable_auto_scaling = true
-min_node_count      = 3
-max_node_count      = 20
-tags = {
-  project     = "aks-automation"
-  environment = "production"
-  owner       = "platform-team"
-}
-```
-
-Then run `terraform apply` without extra `-var` flags.
-
----
-
-## Python CLI Usage
-
-### Installation
-
-```bash
-pip install -r src/requirements.txt
-```
-
-Set the required environment variable:
-
-```bash
-export AZURE_SUBSCRIPTION_ID="<your-subscription-id>"
-```
-
-Optionally, create `src/.env`:
-
-```dotenv
-AZURE_SUBSCRIPTION_ID=<your-subscription-id>
-AKS_RESOURCE_GROUP=my-rg
-AKS_CLUSTER_NAME=my-cluster
-```
-
-### Commands
-
-#### `create-cluster`
-
-Create a new AKS cluster (creates the resource group if it does not exist).
-
-```bash
-python src/aks_manager.py create-cluster \
-  --resource-group my-rg \
-  --cluster-name my-cluster \
-  --location eastus \
-  --node-count 3 \
-  --node-size Standard_D2s_v3 \
-  --kubernetes-version 1.29.0
-```
-
-| Flag | Required | Default | Description |
-|------|----------|---------|-------------|
-| `--resource-group` / `-g` | ✅ | — | Resource group name |
-| `--cluster-name` / `-n` | ✅ | — | Cluster name |
-| `--location` / `-l` | | `eastus` | Azure region |
-| `--node-count` | | `3` | Number of nodes (1–100) |
-| `--node-size` | | `Standard_D2s_v3` | VM SKU |
-| `--kubernetes-version` | | latest | Kubernetes version |
-| `--dns-prefix` | | cluster name | DNS prefix for FQDN |
-
----
-
-#### `delete-cluster`
-
-Delete an AKS cluster (prompts for confirmation unless `--yes` is passed).
-
-```bash
-python src/aks_manager.py delete-cluster \
-  --resource-group my-rg \
-  --cluster-name my-cluster \
-  --yes
-```
-
----
-
-#### `get-credentials`
-
-Fetch the kubeconfig and merge it into `~/.kube/config`.
-
-```bash
-# Merge into ~/.kube/config (default)
-python src/aks_manager.py get-credentials \
-  --resource-group my-rg \
-  --cluster-name my-cluster
-
-# Write to a custom path
-python src/aks_manager.py get-credentials \
-  --resource-group my-rg \
-  --cluster-name my-cluster \
-  --output-file ./my-cluster.yaml
-
-# Fetch admin credentials
-python src/aks_manager.py get-credentials \
-  --resource-group my-rg \
-  --cluster-name my-cluster \
-  --admin
-```
-
----
-
-#### `list-clusters`
-
-List all AKS clusters in the subscription.
-
-```bash
-# Table output (default)
-python src/aks_manager.py list-clusters
-
-# Filter by resource group
-python src/aks_manager.py list-clusters --resource-group my-rg
-
-# JSON output
-python src/aks_manager.py list-clusters --output json
-```
-
----
-
-#### `scale-nodepool`
-
-Scale a node pool to a given count.
-
-```bash
-python src/aks_manager.py scale-nodepool \
-  --resource-group my-rg \
-  --cluster-name my-cluster \
-  --nodepool-name nodepool1 \
-  --node-count 5
-```
-
----
-
-### Help
-
-Every command supports `--help`:
-
-```bash
-python src/aks_manager.py --help
-python src/aks_manager.py create-cluster --help
-```
-
----
-
-## GitHub Actions Setup
-
-### Required Secrets
-
-Go to **Settings → Secrets and variables → Actions** in your GitHub repository and add:
-
-| Secret | Description |
-|--------|-------------|
-| `AZURE_CREDENTIALS` | JSON output of `az ad sp create-for-rbac --sdk-auth` |
-| `AZURE_SUBSCRIPTION_ID` | Your Azure subscription ID |
-| `ARM_CLIENT_ID` | Service principal client ID |
-| `ARM_CLIENT_SECRET` | Service principal client secret |
-| `ARM_TENANT_ID` | Azure AD tenant ID |
-
-`AZURE_CREDENTIALS` is a JSON blob that looks like:
-
-```json
-{
-  "clientId": "...",
-  "clientSecret": "...",
-  "subscriptionId": "...",
-  "tenantId": "...",
-  "activeDirectoryEndpointUrl": "https://login.microsoftonline.com",
-  "resourceManagerEndpointUrl": "https://management.azure.com/",
-  "activeDirectoryGraphResourceId": "https://graph.windows.net/",
-  "sqlManagementEndpointUrl": "https://management.core.windows.net:8443/",
-  "galleryEndpointUrl": "https://gallery.azure.com/",
-  "managementEndpointUrl": "https://management.core.windows.net/"
-}
-```
-
-### Workflow Behaviour
-
-| Event | Jobs that run |
-|-------|--------------|
-| Pull request targeting `main` | `terraform-plan` — posts plan as a PR comment |
-| Push to `main` | `terraform-apply` — requires `production` environment approval |
-| `workflow_dispatch` (plan) | `terraform-plan` |
-| `workflow_dispatch` (apply) | `terraform-apply` |
-| `workflow_dispatch` (destroy) | `terraform-destroy` |
-
-### Production Environment (optional)
-
-To require a manual approval before `terraform apply` runs:
-
-1. Go to **Settings → Environments → New environment** and name it `production`.
-2. Enable **Required reviewers** and add the relevant team or individuals.
-
----
-
-## Deploying the Sample App
-
-After the cluster is up and kubeconfig is merged:
-
-```bash
-# Apply all resources (Namespace, Deployment, ConfigMap, Service, HPA)
-kubectl apply -f kubernetes/deployment.yaml
-
-# Watch the pods come up
-kubectl get pods -n sample-app --watch
-
-# Get the LoadBalancer external IP (may take 1–3 minutes to assign)
-kubectl get svc nginx-service -n sample-app
-
-# Open in browser once EXTERNAL-IP is assigned
-curl http://<EXTERNAL-IP>
-```
-
-Expected output: an HTML page reading "🎉 AKS Cluster is Live!"
-
-### Scaling manually
-
-```bash
-# Via kubectl
-kubectl scale deployment nginx-deployment -n sample-app --replicas=4
-
-# Via Python CLI (scales the underlying node pool, not the deployment)
-python src/aks_manager.py scale-nodepool \
-  --resource-group my-rg \
-  --cluster-name my-cluster \
-  --node-count 5
-```
-
----
-
-## Cleanup
-
-### Remove Kubernetes resources
-
-```bash
-kubectl delete namespace sample-app
-```
-
-### Destroy infrastructure (Terraform)
-
-```bash
-cd terraform
-terraform destroy \
-  -var="resource_group_name=my-rg" \
-  -var="cluster_name=my-cluster"
-```
-
-### Delete resource group entirely (Azure CLI)
-
-```bash
-az group delete --name my-rg --yes --no-wait
-```
-
-> **Warning:** This deletes the resource group and **all** resources inside it. It cannot be undone.
-
----
-
-## Troubleshooting
-
-**`AZURE_SUBSCRIPTION_ID` not set**
-Export the variable or add it to `src/.env`.
-
-**`az login` token expired**
-Run `az login` and re-export `AZURE_SUBSCRIPTION_ID`.
-
-**Terraform: `InsufficientQuota`**
-Request a quota increase in the Azure portal for the selected VM SKU and region, or choose a smaller `node_size`.
-
-**`kubectl` not found when running `get-credentials`**
-Install kubectl or pass `--output-file` to write the kubeconfig to a custom path and use it manually.
-
-**LoadBalancer stuck in `<pending>`**
-Check that the AKS cluster's managed identity has the `Network Contributor` role on the subnet / VNet. On most fresh clusters this resolves automatically within a few minutes.
-
-**GitHub Actions: `The client does not have authorization to perform action`**
-Ensure the service principal has at minimum the `Contributor` role on the subscription (or targeted resource group).
+## Configuration
+
+Settings load from keyword args, environment variables (`AKS_` prefix), then a
+`.env` file. See `.env.example`.
+
+| Variable                 | Default                   | Description                                  |
+| ------------------------ | ------------------------- | -------------------------------------------- |
+| `AZURE_SUBSCRIPTION_ID`  | —                         | Azure subscription ID (required for calls)   |
+| `AKS_RESOURCE_GROUP`     | `aks-automation-rg`       | Resource group for the cluster               |
+| `AKS_LOCATION`           | `eastus`                  | Azure region                                 |
+| `AKS_CLUSTER_NAME`       | `aks-automation-cluster`  | Cluster name                                 |
+| `AKS_KUBERNETES_VERSION` | latest stable             | Kubernetes version                           |
+| `AKS_NODE_COUNT`         | `3`                       | Default node pool size                       |
+| `AKS_VM_SIZE`            | `Standard_D2s_v3`         | VM SKU for nodes                             |
+| `AKS_DNS_PREFIX`         | cluster name              | DNS prefix for the FQDN                      |
+| `AKS_LOG_LEVEL`          | `INFO`                    | Log level                                    |
+
+## Deployment
+
+- **Terraform** — `terraform/` provisions the resource group, VNet/subnet, and
+  cluster. Use `environments/dev` and `environments/prod` tfvars, and the
+  matching `backend.hcl` for remote state
+  (`terraform init -backend-config=environments/prod/backend.hcl`).
+- **GitHub Actions** — `.github/workflows/aks-deploy.yml` runs plan-on-PR and
+  apply-on-merge for the Terraform stack; `ci.yml` lints, tests, and validates.
+- **Container** — build the CLI image with `make docker-build`
+  (`docker run --rm aks-automation:latest --help`).
+- **Sample workload** — `kubectl apply -f kubernetes/deployment.yaml` after
+  fetching credentials.
+
+## Contributing
+
+Contributions are welcome — please read [CONTRIBUTING.md](CONTRIBUTING.md) and
+our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+Please report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+Licensed under the [MIT License](LICENSE).

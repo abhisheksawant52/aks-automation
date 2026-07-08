@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aks-automation"
+version = "0.1.0"
+description = "Typed Azure SDK toolkit and CLI for managing Azure Kubernetes Service (AKS) clusters"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Abhishek Sawant" }]
+keywords = ["azure", "aks", "kubernetes", "automation", "terraform", "cli", "devops"]
+dependencies = [
+  "azure-identity>=1.17",
+  "azure-mgmt-containerservice>=28.0",
+  "azure-mgmt-resource>=23.0",
+  "pydantic-settings>=2.3",
+  "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5", "black>=24.0", "pre-commit>=3.7"]
+
+[project.scripts]
+aks = "aks_automation.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/abhisheksawant52/aks-automation"
+Issues = "https://github.com/abhisheksawant52/aks-automation/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

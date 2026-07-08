@@ -1,0 +1,5 @@
+azure-identity>=1.17
+azure-mgmt-containerservice>=28.0
+azure-mgmt-resource>=23.0
+pydantic-settings>=2.3
+click>=8.1

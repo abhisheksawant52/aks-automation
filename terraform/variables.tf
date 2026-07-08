@@ -27,13 +27,13 @@ variable "dns_prefix" {
 }
 
 variable "kubernetes_version" {
-  description = "Kubernetes version to use (e.g. '1.29.0'). Set to null to use the latest stable version."
+  description = "Kubernetes version to use (e.g. '1.30.0'). Set to null to use the latest stable version."
   type        = string
   default     = null
 }
 
 # ---------------------------------------------------------------------------
-# Node pool
+# Default (system) node pool
 # ---------------------------------------------------------------------------
 
 variable "node_count" {
@@ -47,7 +47,7 @@ variable "node_count" {
   }
 }
 
-variable "node_size" {
+variable "vm_size" {
   description = "Azure VM size for each node in the default node pool."
   type        = string
   default     = "Standard_D2s_v3"
@@ -88,18 +88,52 @@ variable "max_node_count" {
 }
 
 # ---------------------------------------------------------------------------
+# Additional (user) node pool
+# ---------------------------------------------------------------------------
+
+variable "user_node_pool_name" {
+  description = "Name of the additional user node pool for application workloads."
+  type        = string
+  default     = "workload"
+}
+
+variable "user_node_pool_count" {
+  description = "Number of nodes in the additional user node pool."
+  type        = number
+  default     = 2
+}
+
+variable "user_node_pool_vm_size" {
+  description = "Azure VM size for the additional user node pool."
+  type        = string
+  default     = "Standard_D2s_v3"
+}
+
+# ---------------------------------------------------------------------------
 # Networking
 # ---------------------------------------------------------------------------
 
 variable "network_plugin" {
   description = "Kubernetes network plugin to use: 'kubenet' or 'azure' (Azure CNI)."
   type        = string
-  default     = "kubenet"
+  default     = "azure"
 
   validation {
     condition     = contains(["kubenet", "azure"], var.network_plugin)
     error_message = "network_plugin must be either 'kubenet' or 'azure'."
   }
+}
+
+variable "vnet_address_space" {
+  description = "Address space for the virtual network."
+  type        = list(string)
+  default     = ["10.0.0.0/16"]
+}
+
+variable "subnet_prefixes" {
+  description = "Address prefixes for the node subnet."
+  type        = list(string)
+  default     = ["10.0.1.0/24"]
 }
 
 # ---------------------------------------------------------------------------
